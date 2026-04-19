@@ -11,7 +11,11 @@ import random
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = '1234567890'
-global_init("db/banks.sqlite")
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+db_path = os.path.join(BASE_DIR, 'db', 'banks.sqlite')
+
+global_init(db_path)
 login_manager = LoginManager()
 login_manager.init_app(app)
 login_manager.login_view = 'login'
