@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>Словарь</title>
+    <link rel="icon" type="image/png" href="../static/img/android-chrome-192x192.png">
+    <link rel="stylesheet" href="../static/css/styles.css">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.0.1/dist/css/bootstrap.min.css" rel="stylesheet" integrity="sha384-+0n0xVW2eSR5OomGNYDnhzAbDsOXxcvSN1TPprVMTNDbiYZCxYbOOl7+AMvyTG2x" crossorigin="anonymous">
+</head>
+<body>
+    <form method="POST" action="/words">
+        <button type="submit" class="btn btn-dark" name="home" value="home">На главную</button>
+    </form>
+    <table class="table">
+      <thead>
+        <tr>
+          <th scope="col">#</th>
+          <th scope="col">Слово</th>
+          <th scope="col">Перевод</th>
+          <th scope="col"></th>
+        </tr>
+      </thead>
+      <tbody>
+        <form method="POST" action="/words">
+            <th scope="row"></th>
+            <td>
+                <input name="new_word" type="text" class="form-control" placeholder="Слово" required>
+            </td>
+            <td>
+                <input name="new_translation" type="text" class="form-control" placeholder="Перевод" required>
+            </td>
+            <td><button type="submit" class="btn btn-dark" name="add_word" value="add_word">Добавить</button></td>
+        </form>
+        <form method="POST" action="/words">
+        {% block content %}
+        {% for word in words %}
+        <tr>
+          <th scope="row">{{loop.index}}</th>
+          <td>{{word}}</td>
+          <td>{{words[word]}}</td>
+          <td><button type="submit" class="btn btn-dark" name="action" value="{{ word }}">Удалить</button></td>
+        </tr>
+        {% endfor %}
+        {% endblock %}
+        </form>
+      </tbody>
+    </table>
+</body>
+</html>
