@@ -173,26 +173,29 @@ def words():
 
     return render_template('words.html', words=user_bank)
 
-# --- АЛИСА (WEBHOOK) ---
-
 @app.route('/alice', methods=['POST'])
 def alice_webhook():
     try:
         request_data = request.json
         user_id = request_data['session']['user_id']
         
+        # Базовая структура ответа
         res = {
             "version": request_data['version'],
             "session": request_data['session'],
-            "response": {"end_session": False},
-            "session_state": {} 
+            "response": {
+                "end_session": False,
+                "buttons": [
+                    {"title": "Помощь", "hide": True},
+                    {"title": "Покажи слова", "hide": True}
+                ]
+            },
+            "session_state": {}
         }
 
         db_sess = create_session()
         bank_entry = db_sess.query(Bank).filter(Bank.alice_id == user_id).first()
 
-        # Если записи нет, создаем новую. 
-        # ВАЖНО: убедитесь, что в модели Bank id имеет autoincrement=True
         if not bank_entry:
             bank_entry = Bank(alice_id=user_id, bank={})
             db_sess.add(bank_entry)
@@ -200,58 +203,93 @@ def alice_webhook():
 
         user_bank = get_bank_dict(bank_entry)
         words_list = list(user_bank.keys())
-        user_command = request_data['request']['command'].lower().strip()
         
-        session_state = request_data.get('state', {}).get('session', {})
-        current_word = session_state.get('current_word')
+        # Очистка команды пользователя
+        command = request_data['request']['command'].lower().strip()
+        
+        # Читаем состояние
+        state = request_data.get('state', {}).get('session', {})
+        current_word = state.get('current_word')
+        mode = state.get('mode') # Режим: 'ask_translation' или None
 
-        # 1. Обработка команд
-        if user_command in ['помощь', 'что ты умеешь']:
-            res["response"]["text"] = "Я учу слова. Скажи: 'Добавь слово яблоко — apple'."
+        # --- 1. Обработка системных команд ---
+        if command in ['помощь', 'что ты умеешь', 'привет']:
+            res["response"]["text"] = (
+                "Я твой тренажер слов! 🧠\n"
+                "• Чтобы добавить слово, скажи: 'Добавь яблоко — apple'\n"
+                "• Чтобы учить, просто отвечай на мои вопросы.\n"
+                "Что хочешь сделать?"
+            )
             return jsonify(res)
 
-        if user_command.startswith('добавь слово'):
-            raw = user_command.replace('добавь слово', '').strip()
+        if command == 'покажи слова':
+            if not user_bank:
+                res["response"]["text"] = "Твой словарь пока пуст. Добавь первое слово!"
+            else:
+                msg = "\n".join([f"• {k} — {v}" for k, v in user_bank.items()])
+                res["response"]["text"] = f"Твои слова:\n{msg}"
+            return jsonify(res)
+
+        # --- 2. Логика добавления слова ---
+        if 'добавь' in command:
+            raw = command.replace('добавь', '').replace('слово', '').strip()
             sep = '—' if '—' in raw else '-'
             if sep in raw:
                 w, t = [x.strip() for x in raw.split(sep, 1)]
-                user_bank[w] = t
-                bank_entry.bank = user_bank
-                orm.attributes.flag_modified(bank_entry, "bank")
-                db_sess.commit()
-                res["response"]["text"] = f"Записала: {w}."
+                if w and t:
+                    user_bank[w] = t
+                    bank_entry.bank = user_bank
+                    orm.attributes.flag_modified(bank_entry, "bank")
+                    db_sess.commit()
+                    res["response"]["text"] = f"Готово! Слово «{w}» добавлено в банк. Продолжим тренировку?"
+                    # После добавления сразу провоцируем новый вопрос
+                    words_list = list(user_bank.keys())
+                else:
+                    res["response"]["text"] = "Не поняла. Скажи: 'Добавь [слово] тире [перевод]'"
+                    return jsonify(res)
             else:
-                res["response"]["text"] = "Нужно сказать: Добавь слово [слово] тире [перевод]."
-            return jsonify(res)
+                res["response"]["text"] = "Чтобы добавить слово, скажи, например: 'Добавь кошка тире cat'."
+                return jsonify(res)
 
-        # 2. Логика тренировки
+        # --- 3. Логика тренировки (Живучесть) ---
         if len(words_list) < 2:
-            res["response"]["text"] = "В твоем словаре мало слов. Добавь хотя бы два."
+            res["response"]["text"] = "Для начала тренировки добавь хотя бы два слова в свой словарь."
             return jsonify(res)
 
+        # Если это новый сеанс
         if request_data['session'].get('new') or not current_word:
             new_w = random.choice(words_list)
-            res["response"]["text"] = f"Начнем! Как переводится '{new_w}'?"
+            res["response"]["text"] = f"Начнем! Как переводится «{new_w}»?"
             res["session_state"] = {"current_word": new_w}
             return jsonify(res)
 
-        correct_answer = user_bank.get(current_word, "").lower()
-        if user_command == correct_answer:
+        # Проверка ответа
+        correct_answer = user_bank.get(current_word, "").lower().strip()
+        
+        # Сравнение (убираем лишнее)
+        if command == correct_answer or command == f"это {correct_answer}":
             next_w = random.choice([w for w in words_list if w != current_word])
-            res["response"]["text"] = f"Верно! А '{next_w}'?"
+            res["response"]["text"] = f"Правильно! ✅ Следующее: как будет «{next_w}»?"
             res["session_state"] = {"current_word": next_w}
+            # Добавим кнопку-подсказку (просто для красоты)
+            res["response"]["buttons"].append({"title": "Не знаю", "hide": True})
         else:
-            res["response"]["text"] = f"Нет. Попробуй еще раз: '{current_word}'?"
-            res["session_state"] = {"current_word": current_word}
+            if command == "не знаю":
+                res["response"]["text"] = f"Ничего страшного! «{current_word}» — это «{correct_answer}». Попробуем другое слово?"
+                next_w = random.choice([w for w in words_list if w != current_word])
+                res["session_state"] = {"current_word": next_w}
+            else:
+                res["response"]["text"] = f"Нет, не совсем. Попробуй еще раз: «{current_word}»?"
+                res["session_state"] = {"current_word": current_word}
+                res["response"]["buttons"].append({"title": "Сдаюсь", "payload": {"action": "skip"}, "hide": True})
 
         return jsonify(res)
 
     except Exception as e:
-        print(f"ALICE ERROR: {e}")
-        # Возвращаем понятную ошибку вместо 500
+        print(f"CRITICAL ERROR: {e}")
         return jsonify({
             "version": "1.0",
-            "response": {"text": f"Ошибка: {str(e)}", "end_session": True}
+            "response": {"text": "Прости, я немного запуталась. Давай попробуем еще раз?", "end_session": False}
         })
 
 if __name__ == '__main__':
