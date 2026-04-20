@@ -1,5 +1,6 @@
 import os
 import random
+import json
 from flask import Flask, render_template, request, redirect, flash, url_for, jsonify
 from flask_login import LoginManager, login_user, login_required, logout_user, current_user
 from sqlalchemy import orm
@@ -41,7 +42,18 @@ def load_user(user_id_):
     db_sess = create_session()
     return db_sess.get(User, user_id_)
 
-# --- Основные роуты ---
+# --- Вспомогательная функция для работы с JSON в БД ---
+def get_bank_dict(entry):
+    if not entry or not entry.bank:
+        return {}
+    if isinstance(entry.bank, str):
+        try:
+            return json.loads(entry.bank)
+        except:
+            return {}
+    return entry.bank
+
+# --- Основные роуты сайта ---
 
 @app.route('/')
 def index():
@@ -75,10 +87,11 @@ def register():
 
         user = User()
         user.login = form.username.data
-        user.set_password(form.password.data) # Предполагается наличие метода хеширования
+        user.set_password(form.password.data)
         db_sess.add(user)
         db_sess.flush()
 
+        # При создании указываем только id (alice_id пустой)
         new_bank = Bank(id=user.id, bank={})
         db_sess.add(new_bank)
         db_sess.commit()
@@ -104,21 +117,18 @@ def main():
         db_sess.add(bank_entry)
         db_sess.commit()
 
-    user_bank = bank_entry.bank if bank_entry.bank else {}
+    user_bank = get_bank_dict(bank_entry)
     words_list = list(user_bank.keys())
-    
-    # Логика выбора слова для тренировки
     word = random.choice(words_list) if words_list else None
 
     if request.method == 'POST':
         action = request.form.get('action')
-
         if action == 'word_bank':
             return redirect('/words')
 
         if action == 'button_input_word':
             if len(words_list) < 2:
-                flash('Добавьте минимум 2 слова в банк!', 'warning')
+                flash('Добавьте минимум 2 слова!', 'warning')
                 return redirect(url_for('main'))
 
             current_word = request.form.get('current_word')
@@ -130,7 +140,7 @@ def main():
                 new_word = random.choice([w for w in words_list if w != current_word])
                 return render_template('main.html', word=new_word)
             else:
-                flash('Неверно, попробуйте еще раз', 'danger')
+                flash('Неверно!', 'danger')
                 return render_template('main.html', word=current_word)
 
     return render_template('main.html', word=word)
@@ -140,7 +150,7 @@ def main():
 def words():
     db_sess = create_session()
     user_bank_entry = db_sess.query(Bank).filter(Bank.id == current_user.id).first()
-    user_bank = user_bank_entry.bank or {}
+    user_bank = get_bank_dict(user_bank_entry)
 
     if request.method == 'POST':
         if 'add_word' in request.form:
@@ -159,115 +169,90 @@ def words():
                 user_bank_entry.bank = user_bank
                 orm.attributes.flag_modified(user_bank_entry, "bank")
                 db_sess.commit()
-
         return redirect(url_for('words'))
 
     return render_template('words.html', words=user_bank)
-
-@app.route('/update_avatar', methods=['POST'])
-@login_required
-def update_avatar():
-    if 'avatar_file' not in request.files:
-        flash('Файл не выбран', 'danger')
-        return redirect(url_for('main'))
-
-    file = request.files['avatar_file']
-    if file and allowed_file(file.filename):
-        ext = file.filename.rsplit('.', 1)[1].lower()
-        filename = secure_filename(f"user_{current_user.id}.{ext}")
-        file_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-        file.save(file_path)
-
-        db_sess = create_session()
-        user = db_sess.get(User, current_user.id)
-        user.avatar_path = f"avatars/{filename}"
-        db_sess.commit()
-        flash('Аватар обновлен!', 'success')
-    return redirect(url_for('main'))
 
 # --- АЛИСА (WEBHOOK) ---
 
 @app.route('/alice', methods=['POST'])
 def alice_webhook():
-    request_data = request.json
-    user_id = request_data['session']['user_id']
-    
-    response = {
-        "version": request_data['version'],
-        "session": request_data['session'],
-        "response": {"end_session": False}
-    }
+    try:
+        request_data = request.json
+        user_id = request_data['session']['user_id']
+        
+        res = {
+            "version": request_data['version'],
+            "session": request_data['session'],
+            "response": {"end_session": False},
+            "session_state": {} 
+        }
 
-    db_sess = create_session()
-    # Ищем по alice_id (убедитесь, что это поле есть в модели Bank)
-    bank_entry = db_sess.query(Bank).filter(Bank.alice_id == user_id).first()
+        db_sess = create_session()
+        bank_entry = db_sess.query(Bank).filter(Bank.alice_id == user_id).first()
 
-    if not bank_entry:
-        bank_entry = Bank(alice_id=user_id, bank={})
-        db_sess.add(bank_entry)
-        db_sess.commit()
-
-    user_bank = bank_entry.bank or {}
-    words_list = list(user_bank.keys())
-    user_command = request_data['request']['command'].lower().strip()
-    
-    # Получаем состояние из предыдущего хода
-    session_state = request_data.get('state', {}).get('session', {})
-    current_word = session_state.get('current_word')
-
-    # 1. Обработка команд управления
-    if user_command in ['помощь', 'что ты умеешь', 'команды']:
-        response["response"]["text"] = (
-            "Я помогу учить слова! Можно сказать: 'Добавь слово яблоко — apple', "
-            "'Покажи слова' или 'Удали слово яблоко'. Также я буду спрашивать перевод!"
-        )
-        return jsonify(response)
-
-    if user_command == 'покажи слова':
-        if not user_bank:
-            response["response"]["text"] = "Твой банк пуст."
-        else:
-            msg = "\n".join([f"{k} — {v}" for k, v in user_bank.items()])
-            response["response"]["text"] = f"Твои слова:\n{msg}"
-        return jsonify(response)
-
-    if user_command.startswith('добавь слово'):
-        raw = user_command.replace('добавь слово', '').strip()
-        sep = '—' if '—' in raw else '-'
-        if sep in raw:
-            w, t = [x.strip() for x in raw.split(sep, 1)]
-            user_bank[w] = t
-            bank_entry.bank = user_bank
-            orm.attributes.flag_modified(bank_entry, "bank")
+        # Если записи нет, создаем новую. 
+        # ВАЖНО: убедитесь, что в модели Bank id имеет autoincrement=True
+        if not bank_entry:
+            bank_entry = Bank(alice_id=user_id, bank={})
+            db_sess.add(bank_entry)
             db_sess.commit()
-            response["response"]["text"] = f"Добавила: {w}"
+
+        user_bank = get_bank_dict(bank_entry)
+        words_list = list(user_bank.keys())
+        user_command = request_data['request']['command'].lower().strip()
+        
+        session_state = request_data.get('state', {}).get('session', {})
+        current_word = session_state.get('current_word')
+
+        # 1. Обработка команд
+        if user_command in ['помощь', 'что ты умеешь']:
+            res["response"]["text"] = "Я учу слова. Скажи: 'Добавь слово яблоко — apple'."
+            return jsonify(res)
+
+        if user_command.startswith('добавь слово'):
+            raw = user_command.replace('добавь слово', '').strip()
+            sep = '—' if '—' in raw else '-'
+            if sep in raw:
+                w, t = [x.strip() for x in raw.split(sep, 1)]
+                user_bank[w] = t
+                bank_entry.bank = user_bank
+                orm.attributes.flag_modified(bank_entry, "bank")
+                db_sess.commit()
+                res["response"]["text"] = f"Записала: {w}."
+            else:
+                res["response"]["text"] = "Нужно сказать: Добавь слово [слово] тире [перевод]."
+            return jsonify(res)
+
+        # 2. Логика тренировки
+        if len(words_list) < 2:
+            res["response"]["text"] = "В твоем словаре мало слов. Добавь хотя бы два."
+            return jsonify(res)
+
+        if request_data['session'].get('new') or not current_word:
+            new_w = random.choice(words_list)
+            res["response"]["text"] = f"Начнем! Как переводится '{new_w}'?"
+            res["session_state"] = {"current_word": new_w}
+            return jsonify(res)
+
+        correct_answer = user_bank.get(current_word, "").lower()
+        if user_command == correct_answer:
+            next_w = random.choice([w for w in words_list if w != current_word])
+            res["response"]["text"] = f"Верно! А '{next_w}'?"
+            res["session_state"] = {"current_word": next_w}
         else:
-            response["response"]["text"] = "Скажи: добавь слово [слово] — [перевод]"
-        return jsonify(response)
+            res["response"]["text"] = f"Нет. Попробуй еще раз: '{current_word}'?"
+            res["session_state"] = {"current_word": current_word}
 
-    # 2. Логика тренировки
-    if len(words_list) < 2:
-        response["response"]["text"] = "В банке мало слов. Добавь хотя бы два!"
-        return jsonify(response)
+        return jsonify(res)
 
-    # Если только зашли или нет текущего слова - задаем новый вопрос
-    if request_data['session']['new'] or not current_word:
-        new_w = random.choice(words_list)
-        response["response"]["text"] = f"Начнем! Как переводится '{new_w}'?"
-        response["session_state"] = {"current_word": new_w}
-        return jsonify(response)
-
-    # Проверка ответа пользователя
-    correct = user_bank.get(current_word, "").lower()
-    if user_command == correct:
-        next_w = random.choice([w for w in words_list if w != current_word])
-        response["response"]["text"] = f"Верно! А '{next_w}'?"
-        response["session_state"] = {"current_word": next_w}
-    else:
-        response["response"]["text"] = f"Нет, не угадал. Попробуй еще раз: '{current_word}'?"
-        response["session_state"] = {"current_word": current_word}
-
-    return jsonify(response)
+    except Exception as e:
+        print(f"ALICE ERROR: {e}")
+        # Возвращаем понятную ошибку вместо 500
+        return jsonify({
+            "version": "1.0",
+            "response": {"text": f"Ошибка: {str(e)}", "end_session": True}
+        })
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8080)
