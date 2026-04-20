@@ -2,8 +2,8 @@ import os
 import random
 import json
 import logging
+import re
 from datetime import datetime
-
 from flask import Flask, render_template, request, redirect, flash, url_for, jsonify
 from flask_login import LoginManager, login_user, login_required, logout_user, current_user
 from sqlalchemy import orm
@@ -14,18 +14,17 @@ from data.Users import User
 from forms import LoginForm, RegisterForm
 
 app = Flask(__name__)
-app.config['SECRET_KEY'] = 'enterprise_alice_dictionary_v5_final'
+app.config['SECRET_KEY'] = 'pep8_compliant_dictionary_450_lines'
+app.config['JSON_AS_ASCII'] = False
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("App")
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-db_dir = os.path.join(BASE_DIR, 'db')
-os.makedirs(db_dir, exist_ok=True)
-db_path = os.path.join(db_dir, 'banks.sqlite')
+if not os.path.exists(os.path.join(BASE_DIR, 'db')):
+    os.makedirs(os.path.join(BASE_DIR, 'db'))
+
+db_path = os.path.join(BASE_DIR, 'db', 'banks.sqlite')
 global_init(db_path)
 
 login_manager = LoginManager()
@@ -33,7 +32,7 @@ login_manager.init_app(app)
 login_manager.login_view = 'login'
 
 
-def get_default_data():
+def get_empty_bank_data():
     return {
         "words": {},
         "stats": {
@@ -41,66 +40,66 @@ def get_default_data():
             "level": 1,
             "correct": 0,
             "wrong": 0,
-            "streak": 0
+            "streak": 0,
+            "max_streak": 0
         },
         "achievements": [],
-        "categories": ["общие"],
         "history": []
     }
 
 
-def get_safe_bank(entry):
-    if not entry or not entry.bank:
-        return get_default_data()
-    if isinstance(entry.bank, str):
-        try:
-            return json.loads(entry.bank)
-        except (json.JSONDecodeError, TypeError):
-            return get_default_data()
-    return entry.bank
-
-
-def clean_text(text):
-    if not text:
+def clean_user_text(text):
+    if text is None:
         return ""
     text = text.lower().strip()
-    symbols = '.,!?;:-—"()[]{}'
-    for char in symbols:
-        text = text.replace(char, ' ')
+    symbols = ".,!?;:-()\""
+    for s in symbols:
+        text = text.replace(s, "")
     return " ".join(text.split())
 
 
-def check_achievements(full_data):
-    new_achs = []
-    stats = full_data.get("stats", {})
-    words_count = len(full_data.get("words", {}))
-
-    if words_count >= 10 and "Новичок (10 слов)" not in full_data["achievements"]:
-        new_achs.append("Новичок (10 слов)")
-    if stats.get("score", 0) >= 100 and "Сотня!" not in full_data["achievements"]:
-        new_achs.append("Сотня!")
-    if stats.get("correct", 0) >= 50 and "Знаток" not in full_data["achievements"]:
-        new_achs.append("Знаток")
-    
-    if new_achs:
-        full_data["achievements"].extend(new_achs)
-        return True, new_achs
-    return False, []
-
-
 @login_manager.user_loader
-def load_user(user_id):
+def load_user_func(user_id):
     db_sess = create_session()
-    return db_sess.get(User, user_id)
+    user = db_sess.query(User).get(user_id)
+    db_sess.close()
+    return user
 
 
 @app.route('/')
-def index():
+def route_index():
     return redirect('/main')
 
 
+@app.route('/main')
+@login_required
+def route_main():
+    db_sess = create_session()
+    entry = db_sess.query(Bank).filter(Bank.id == current_user.id).first()
+    if not entry:
+        db_sess.close()
+        return "System error: Data not found."
+    if isinstance(entry.bank, str):
+        data = json.loads(entry.bank)
+    else:
+        data = entry.bank
+    db_sess.close()
+    simple_words = {}
+    for key in data['words']:
+        if isinstance(data['words'][key], dict):
+            simple_words[key] = data['words'][key]['translation']
+        else:
+            simple_words[key] = data['words'][key]
+    return render_template(
+        'main.html',
+        words=simple_words,
+        stats=data['stats'],
+        achs=data['achievements']
+    )
+
+
 @app.route('/login', methods=['GET', 'POST'])
-def login():
+def route_login():
     if current_user.is_authenticated:
         return redirect('/main')
     form = LoginForm()
@@ -111,279 +110,210 @@ def login():
         ).first()
         if user and user.check_password(form.password.data):
             login_user(user, remember=form.remember_me.data)
+            db_sess.close()
             return redirect("/main")
-        flash('Неверные учетные данные', 'danger')
+        flash('Неверный логин или пароль', 'danger')
+        db_sess.close()
     return render_template('login.html', form=form)
 
 
 @app.route('/register', methods=['GET', 'POST'])
-def register():
-    if current_user.is_authenticated:
-        return redirect('/main')
+def route_register():
     form = RegisterForm()
     if form.validate_on_submit():
         db_sess = create_session()
-        if db_sess.query(User).filter(User.login == form.username.data).first():
+        existing = db_sess.query(User).filter(
+            User.login == form.username.data
+        ).first()
+        if existing:
             flash("Этот логин уже занят", "warning")
+            db_sess.close()
             return render_template('register.html', form=form)
-        user = User(login=form.username.data)
+        user = User()
+        user.login = form.username.data
         user.set_password(form.password.data)
         db_sess.add(user)
-        db_sess.flush()
-        new_bank = Bank(
-            id=user.id,
-            bank=get_default_data()
-        )
-        db_sess.add(new_bank)
         db_sess.commit()
-        flash("Регистрация завершена!", "success")
-        return redirect(url_for('login'))
+        bank = Bank()
+        bank.id = user.id
+        bank.bank = get_empty_bank_data()
+        db_sess.add(bank)
+        db_sess.commit()
+        db_sess.close()
+        flash("Вы успешно зарегистрировались!", "success")
+        return redirect(url_for('route_login'))
     return render_template('register.html', form=form)
 
 
-@app.route('/logout')
-@login_required
-def logout():
-    logout_user()
-    return redirect("/")
-
-
-@app.route('/main')
-@login_required
-def main():
-    db_sess = create_session()
-    bank_entry = db_sess.query(Bank).filter(Bank.id == current_user.id).first()
-    data = get_safe_bank(bank_entry)
-    return render_template(
-        'main.html',
-        words=data.get("words", {}),
-        stats=data.get("stats", {}),
-        achs=data.get("achievements", [])
-    )
-
-
 @app.route('/alice', methods=['POST'])
-def alice_webhook():
-    try:
-        req = request.json
-        user_id = req['session']['user_id']
-        db_sess = create_session()
-        bank_entry = db_sess.query(Bank).filter(Bank.alice_id == user_id).first()
+def alice_webhook_main():
+    req = request.json
+    user_id = req['session']['user_id']
+    raw_command = req['request']['command']
+    command = clean_user_text(raw_command)
+    if 'state' in req and 'session' in req['state']:
+        state = req['state']['session']
+    else:
+        state = {}
+    db_sess = create_session()
+    entry = db_sess.query(Bank).filter(Bank.alice_id == user_id).first()
+    if entry is None:
+        entry = Bank()
+        entry.alice_id = user_id
+        entry.bank = get_empty_bank_data()
+        db_sess.add(entry)
+        db_sess.commit()
+    if isinstance(entry.bank, str):
+        full_data = json.loads(entry.bank)
+    else:
+        full_data = entry.bank
+    words = full_data['words']
+    stats = full_data['stats']
+    res = {
+        "version": req['version'],
+        "session": req['session'],
+        "response": {
+            "end_session": False,
+            "buttons": [
+                {"title": "Учить", "hide": True},
+                {"title": "Добавить слово", "hide": True},
+                {"title": "Статистика", "hide": True}
+            ]
+        },
+        "session_state": state
+    }
 
-        if not bank_entry:
-            bank_entry = Bank(
-                alice_id=user_id,
-                bank=get_default_data()
-            )
-            db_sess.add(bank_entry)
-            db_sess.commit()
+    if command in ["стоп", "выход", "закрой"]:
+        res['response']['text'] = "До встречи! Хорошего дня."
+        res['response']['end_session'] = True
+        db_sess.close()
+        return jsonify(res)
 
-        full_data = get_safe_bank(bank_entry)
-        user_bank = full_data.get("words", {})
-        stats = full_data.get("stats")
-
-        raw_command = req['request']['command']
-        command = clean_text(raw_command)
-        state = req.get('state', {}).get('session', {})
-
-        res = {
-            "version": req['version'],
-            "session": req['session'],
-            "response": {"end_session": False, "buttons": []},
-            "session_state": state
+    if state.get('action') == 'waiting_for_translation':
+        word_rus = state.get('temp_rus')
+        word_eng = raw_command
+        words[word_rus] = {
+            "translation": word_eng,
+            "added_at": datetime.now().isoformat(),
+            "level": 0
         }
+        full_data['words'] = words
+        entry.bank = full_data
+        orm.attributes.flag_modified(entry, "bank")
+        db_sess.commit()
+        res['response']['text'] = f"Записала! {word_rus} — {word_eng}."
+        res['session_state'] = {}
+        db_sess.close()
+        return jsonify(res)
 
-        def build_response(text, tts=None, buttons=None, new_state=None):
-            res["response"]["text"] = text
-            if tts:
-                res["response"]["tts"] = tts
-            if buttons:
-                res["response"]["buttons"] = [
-                    {"title": b, "hide": True} for b in buttons
-                ]
+    if state.get('action') == 'waiting_for_word':
+        res['response']['text'] = f"Хорошо, '{raw_command}'. Какой перевод?"
+        res['session_state'] = {
+            "action": "waiting_for_translation",
+            "temp_rus": raw_command
+        }
+        db_sess.close()
+        return jsonify(res)
+
+    if state.get('mode') == 'training':
+        target_word = state.get('current_q')
+        correct_answer = words[target_word]['translation']
+        if clean_user_text(raw_command) == clean_user_text(correct_answer):
+            stats['score'] += 10
+            stats['correct'] += 1
+            stats['streak'] += 1
+            if stats['streak'] > stats['max_streak']:
+                stats['max_streak'] = stats['streak']
+            if stats['score'] >= stats['level'] * 100:
+                stats['level'] += 1
+                msg = f"Верно! Новый уровень: {stats['level']}! "
             else:
-                res["response"]["buttons"] = [
-                    {"title": "Тренировка", "hide": True},
-                    {"title": "Добавить слово", "hide": True},
-                    {"title": "Достижения", "hide": True},
-                    {"title": "Статистика", "hide": True}
-                ]
-            if new_state is not None:
-                res["session_state"] = new_state
+                msg = "Правильно! "
+            all_keys = list(words.keys())
+            next_q = random.choice(all_keys)
+            full_data['stats'] = stats
+            entry.bank = full_data
+            orm.attributes.flag_modified(entry, "bank")
+            db_sess.commit()
+            res['response']['text'] = msg + f"Как переводится '{next_q}'?"
+            res['session_state'] = {"mode": "training", "current_q": next_q}
+            db_sess.close()
+            return jsonify(res)
+        elif command in ["сдаюсь", "пропустить", "не знаю"]:
+            stats['wrong'] += 1
+            stats['streak'] = 0
+            all_keys = list(words.keys())
+            next_q = random.choice(all_keys)
+            full_data['stats'] = stats
+            entry.bank = full_data
+            orm.attributes.flag_modified(entry, "bank")
+            db_sess.commit()
+            res['response']['text'] = (
+                f"Это было '{correct_answer}'. "
+                f"Попробуем другое: '{next_q}'?"
+            )
+            res['session_state'] = {"mode": "training", "current_q": next_q}
+            db_sess.close()
+            return jsonify(res)
+        else:
+            res['response']['text'] = (
+                f"Нет, это не '{raw_command}'. "
+                f"Попробуй еще раз или скажи 'сдаюсь'."
+            )
+            db_sess.close()
             return jsonify(res)
 
-        if any(x in command for x in ['стоп', 'выход', 'хватит', 'закрой']):
-            return build_response(
-                "До свидания! Жду новых тренировок.",
-                tts="До встр+ечи! Возвращ+айся скор+ее.",
-                new_state={}
-            )
+    if command in ["добавить", "добавить слово"]:
+        res['response']['text'] = "Какое слово на русском добавим?"
+        res['session_state'] = {"action": "waiting_for_word"}
+        db_sess.close()
+        return jsonify(res)
 
-        if not command or req['session']['new']:
-            welcome = (
-                f"Рада видеть! В вашем словаре {len(user_bank)} слов. "
-                f"Уровень: {stats.get('level')}. Что выберете?"
-            )
-            return build_response(
-                welcome,
-                buttons=["Учить", "Добавить", "Статистика", "Помощь"]
-            )
+    if command in ["учить", "тренировка"]:
+        all_keys = list(words.keys())
+        if len(all_keys) < 1:
+            res['response']['text'] = "В словаре пусто. Добавьте слова."
+        else:
+            q = random.choice(all_keys)
+            res['response']['text'] = f"Начнем. Как переводится '{q}'?"
+            res['session_state'] = {"mode": "training", "current_q": q}
+        db_sess.close()
+        return jsonify(res)
 
-        if any(x in command for x in ['помощь', 'умеешь', 'правила']):
-            help_msg = (
-                "Я — ваш тренажер. \n"
-                "• Добавляйте: 'Добавь Кот — Cat'.\n"
-                "• Учите: просто скажите 'Учить'.\n"
-                "• Удаляйте: 'Удали слово Кот'.\n"
-                "• Мои успехи: кнопка 'Статистика'."
-            )
-            return build_response(help_msg)
+    if command in ["статистика", "прогресс"]:
+        txt = (
+            f"Уровень: {stats['level']}. "
+            f"Очки: {stats['score']}. "
+            f"Верно: {stats['correct']}. "
+            f"Серия: {stats['max_streak']}."
+        )
+        res['response']['text'] = txt
+        db_sess.close()
+        return jsonify(res)
 
-        if any(x in command for x in ['достижения', 'ачивки', 'награды']):
-            achs = full_data.get("achievements", [])
-            if not achs:
-                return build_response("У вас пока нет наград. Начните учить слова!")
-            msg = "Ваши награды: " + ", ".join(achs)
-            return build_response(msg)
+    if command in ["помощь", "что ты умеешь"]:
+        h = (
+            "Я помогаю учить слова. \n"
+            "Скажите 'Добавить' - для нового слова. \n"
+            "Скажите 'Учить' - для проверки. \n"
+            "Скажите 'Статистика' - для прогресса."
+        )
+        res['response']['text'] = h
+        db_sess.close()
+        return jsonify(res)
 
-        if any(x in command for x in ['статистика', 'прогресс', 'счет']):
-            msg = (
-                f"Ваш прогресс:\n"
-                f"Очки: {stats.get('score')}\n"
-                f"Уровень: {stats.get('level')}\n"
-                f"Верно: {stats.get('correct')}\n"
-                f"Ошибок: {stats.get('wrong')}"
-            )
-            return build_response(msg)
+    if req['session']['new']:
+        res['response']['text'] = (
+            f"Привет! В вашем словаре {len(words)} слов. "
+            f"Что будем делать сегодня?"
+        )
+    else:
+        res['response']['text'] = "Я вас не поняла. Скажите 'Помощь'."
 
-        if command.startswith(('удали', 'сотри', 'забудь')):
-            target = command.replace('удали', '').replace(
-                'сотри', '').replace('забудь', '').replace('слово', '').strip()
-            if target in user_bank:
-                del user_bank[target]
-                full_data["words"] = user_bank
-                bank_entry.bank = full_data
-                orm.attributes.flag_modified(bank_entry, "bank")
-                db_sess.commit()
-                return build_response(f"Слово '{target}' удалено.")
-            return build_response(f"Слова '{target}' нет в списке.")
-
-        if command in ['добавить', 'добавить слово', 'новое слово']:
-            return build_response(
-                "Какое слово запишем? Сначала назовите на русском.",
-                new_state={"action": "add_1"}
-            )
-
-        if state.get('action') == "add_1":
-            return build_response(
-                f"Запомнила: '{raw_command}'. Какой перевод?",
-                new_state={"action": "add_2", "tmp_w": raw_command}
-            )
-
-        if state.get('action') == "add_2":
-            word = state.get('tmp_w')
-            user_bank[word] = raw_command
-            full_data["words"] = user_bank
-            bank_entry.bank = full_data
-            orm.attributes.flag_modified(bank_entry, "bank")
-            db_sess.commit()
-            return build_response(
-                f"Готово! '{word}' теперь в словаре.",
-                new_state={},
-                buttons=["Учить", "Еще слово"]
-            )
-
-        for sep in ['—', '-', 'тире', 'это']:
-            if sep in raw_command and 'добавь' in command:
-                parts = raw_command.lower().replace(
-                    'добавь', '').replace('слово', '').split(sep)
-                if len(parts) >= 2:
-                    w, t = parts[0].strip(), parts[1].strip()
-                    user_bank[w] = t
-                    full_data["words"] = user_bank
-                    bank_entry.bank = full_data
-                    orm.attributes.flag_modified(bank_entry, "bank")
-                    db_sess.commit()
-                    return build_response(f"Добавила: {w} - {t}.")
-
-        if command in ['учить', 'тренировка', 'старт', 'играть'] or state.get('cur'):
-            words_list = list(user_bank.keys())
-            if len(words_list) < 2:
-                return build_response("Нужно добавить хотя бы 2 слова для теста.")
-
-            current_q = state.get('cur')
-            if not current_q:
-                new_q = random.choice(words_list)
-                return build_response(
-                    f"Как переводится '{new_q}'?",
-                    new_state={"cur": new_q}
-                )
-
-            correct = user_bank.get(current_q, "").lower().strip()
-            if command == clean_text(correct):
-                stats['score'] += 10
-                stats['correct'] += 1
-                stats['streak'] += 1
-
-                if stats['score'] >= stats['level'] * 100:
-                    stats['level'] += 1
-                    msg, sound = "Новый уровень! ", "game-win-1"
-                else:
-                    msg, sound = "Верно! ", "game-ping-1"
-
-                updated, new_achs = check_achievements(full_data)
-                if updated:
-                    msg += f"Получена награда: {', '.join(new_achs)}! "
-
-                full_data['stats'] = stats
-                bank_entry.bank = full_data
-                orm.attributes.flag_modified(bank_entry, "bank")
-                db_sess.commit()
-
-                next_q = random.choice([w for w in words_list if w != current_q])
-                return build_response(
-                    f"{msg}Дальше: '{next_q}'?",
-                    tts=f"<speaker audio=\"alice-sounds-{sound}.opus\"> {msg} "
-                        f"Следующее: {next_q}?",
-                    new_state={"cur": next_q}
-                )
-
-            if any(x in command for x in ['не знаю', 'сдаюсь', 'пропусти']):
-                stats['wrong'] += 1
-                stats['streak'] = 0
-                next_q = random.choice([w for w in words_list if w != current_q])
-                return build_response(
-                    f"'{current_q}' — это '{correct}'. Дальше: '{next_q}'?",
-                    new_state={"cur": next_q}
-                )
-
-            return build_response(
-                f"Нет. Попробуйте еще раз: '{current_q}'?",
-                tts=f"<speaker audio=\"alice-sounds-game-loss-1.opus\"> "
-                    f"Попр+обуй ещ+е раз. {current_q}?",
-                new_state={"cur": current_q},
-                buttons=["Сдаюсь", "Подсказка"]
-            )
-
-        if command == 'подсказка' and state.get('cur'):
-            word = state.get('cur')
-            correct = user_bank.get(word, "")
-            hint = f"{correct[0]}{'*' * (len(correct) - 1)}"
-            return build_response(f"Первая буква: {hint}", new_state=state)
-
-        return build_response("Не совсем поняла вас. Попробуйте нажать 'Помощь'.")
-
-    except Exception as e:
-        logger.error(f"Critical error in Alice Webhook: {e}", exc_info=True)
-        return jsonify({
-            "version": "1.0",
-            "response": {
-                "text": "Произошла системная ошибка. Мы уже чиним её!",
-                "end_session": False
-            }
-        })
+    db_sess.close()
+    return jsonify(res)
 
 
 if __name__ == '__main__':
-    server_port = int(os.environ.get("PORT", 8080))
-    app.run(host='0.0.0.0', port=server_port)
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host='0.0.0.0', port=port)
