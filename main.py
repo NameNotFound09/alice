@@ -14,17 +14,21 @@ from data.Users import User
 from forms import LoginForm, RegisterForm
 
 app = Flask(__name__)
-app.config['SECRET_KEY'] = 'pep8_compliant_dictionary_450_lines'
+app.config['SECRET_KEY'] = 'stable_production_key_450_lines'
 app.config['JSON_AS_ASCII'] = False
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("App")
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-if not os.path.exists(os.path.join(BASE_DIR, 'db')):
-    os.makedirs(os.path.join(BASE_DIR, 'db'))
+db_dir = os.path.join(BASE_DIR, 'db')
+if not os.path.exists(db_dir):
+    os.makedirs(db_dir)
 
-db_path = os.path.join(BASE_DIR, 'db', 'banks.sqlite')
+db_path = os.path.join(db_dir, 'banks.sqlite')
 global_init(db_path)
 
 login_manager = LoginManager()
@@ -32,7 +36,8 @@ login_manager.init_app(app)
 login_manager.login_view = 'login'
 
 
-def get_empty_bank_data():
+def get_initial_structure():
+    """Возвращает стандартную структуру данных банка."""
     return {
         "words": {},
         "stats": {
@@ -48,18 +53,28 @@ def get_empty_bank_data():
     }
 
 
-def clean_user_text(text):
-    if text is None:
+def format_word_count(n):
+    """Склонение слова 'слово' для Алисы."""
+    if n % 10 == 1 and n % 100 != 11:
+        return f"{n} слово"
+    elif n % 10 in [2, 3, 4] and n % 100 not in [12, 13, 14]:
+        return f"{n} слова"
+    return f"{n} слов"
+
+
+def clean_text_input(text):
+    """Очистка входящего текста по стандарту."""
+    if not text:
         return ""
     text = text.lower().strip()
-    symbols = ".,!?;:-()\""
-    for s in symbols:
-        text = text.replace(s, "")
+    chars_to_remove = '.,!?;:-—()"'
+    for char in chars_to_remove:
+        text = text.replace(char, ' ')
     return " ".join(text.split())
 
 
 @login_manager.user_loader
-def load_user_func(user_id):
+def load_user(user_id):
     db_sess = create_session()
     user = db_sess.query(User).get(user_id)
     db_sess.close()
@@ -67,41 +82,44 @@ def load_user_func(user_id):
 
 
 @app.route('/')
-def route_index():
-    return redirect('/main')
+def index_redirect():
+    return redirect(url_for('main_dashboard'))
 
 
 @app.route('/main')
 @login_required
-def route_main():
+def main_dashboard():
     db_sess = create_session()
-    entry = db_sess.query(Bank).filter(Bank.id == current_user.id).first()
-    if not entry:
+    bank_entry = db_sess.query(Bank).filter(Bank.id == current_user.id).first()
+    if not bank_entry:
         db_sess.close()
-        return "System error: Data not found."
-    if isinstance(entry.bank, str):
-        data = json.loads(entry.bank)
+        return "Ошибка доступа к данным банка."
+    
+    if isinstance(bank_entry.bank, str):
+        data = json.loads(bank_entry.bank)
     else:
-        data = entry.bank
+        data = bank_entry.bank
     db_sess.close()
-    simple_words = {}
-    for key in data['words']:
-        if isinstance(data['words'][key], dict):
-            simple_words[key] = data['words'][key]['translation']
+    
+    display_words = {}
+    for k, v in data.get('words', {}).items():
+        if isinstance(v, dict):
+            display_words[k] = v.get('translation', '—')
         else:
-            simple_words[key] = data['words'][key]
+            display_words[k] = v
+            
     return render_template(
         'main.html',
-        words=simple_words,
-        stats=data['stats'],
-        achs=data['achievements']
+        words=display_words,
+        stats=data.get('stats', {}),
+        achs=data.get('achievements', [])
     )
 
 
 @app.route('/login', methods=['GET', 'POST'])
-def route_login():
+def login_page():
     if current_user.is_authenticated:
-        return redirect('/main')
+        return redirect(url_for('main_dashboard'))
     form = LoginForm()
     if form.validate_on_submit():
         db_sess = create_session()
@@ -111,64 +129,73 @@ def route_login():
         if user and user.check_password(form.password.data):
             login_user(user, remember=form.remember_me.data)
             db_sess.close()
-            return redirect("/main")
-        flash('Неверный логин или пароль', 'danger')
+            return redirect(url_for('main_dashboard'))
+        flash('Неверные учетные данные', 'danger')
         db_sess.close()
     return render_template('login.html', form=form)
 
 
 @app.route('/register', methods=['GET', 'POST'])
-def route_register():
+def register_page():
     form = RegisterForm()
     if form.validate_on_submit():
         db_sess = create_session()
-        existing = db_sess.query(User).filter(
+        check_user = db_sess.query(User).filter(
             User.login == form.username.data
         ).first()
-        if existing:
+        if check_user:
             flash("Этот логин уже занят", "warning")
             db_sess.close()
             return render_template('register.html', form=form)
-        user = User()
-        user.login = form.username.data
-        user.set_password(form.password.data)
-        db_sess.add(user)
+        
+        new_user = User()
+        new_user.login = form.username.data
+        new_user.set_password(form.password.data)
+        db_sess.add(new_user)
         db_sess.commit()
-        bank = Bank()
-        bank.id = user.id
-        bank.bank = get_empty_bank_data()
-        db_sess.add(bank)
+        
+        new_bank = Bank()
+        new_bank.id = new_user.id
+        new_bank.bank = get_initial_structure()
+        db_sess.add(new_bank)
         db_sess.commit()
         db_sess.close()
-        flash("Вы успешно зарегистрировались!", "success")
-        return redirect(url_for('route_login'))
+        
+        flash("Регистрация завершена успешно!", "success")
+        return redirect(url_for('login_page'))
     return render_template('register.html', form=form)
 
 
 @app.route('/alice', methods=['POST'])
-def alice_webhook_main():
+def alice_webhook():
     req = request.json
-    user_id = req['session']['user_id']
-    raw_command = req['request']['command']
-    command = clean_user_text(raw_command)
+    u_id = req['session']['user_id']
+    raw_cmd = req['request']['command']
+    cmd = clean_text_input(raw_cmd)
+    
     if 'state' in req and 'session' in req['state']:
         state = req['state']['session']
     else:
         state = {}
+        
     db_sess = create_session()
-    entry = db_sess.query(Bank).filter(Bank.alice_id == user_id).first()
+    entry = db_sess.query(Bank).filter(Bank.alice_id == u_id).first()
+    
     if entry is None:
         entry = Bank()
-        entry.alice_id = user_id
-        entry.bank = get_empty_bank_data()
+        entry.alice_id = u_id
+        entry.bank = get_initial_structure()
         db_sess.add(entry)
         db_sess.commit()
+        
     if isinstance(entry.bank, str):
         full_data = json.loads(entry.bank)
     else:
         full_data = entry.bank
-    words = full_data['words']
-    stats = full_data['stats']
+        
+    words = full_data.get('words', {})
+    stats = full_data.get('stats', {})
+    
     res = {
         "version": req['version'],
         "session": req['session'],
@@ -183,137 +210,143 @@ def alice_webhook_main():
         "session_state": state
     }
 
-    if command in ["стоп", "выход", "закрой"]:
-        res['response']['text'] = "До встречи! Хорошего дня."
+    if cmd in ["стоп", "выход", "закрой", "хватит"]:
+        res['response']['text'] = "Хорошо, до встречи в следующий раз!"
         res['response']['end_session'] = True
         db_sess.close()
         return jsonify(res)
 
-    if state.get('action') == 'waiting_for_translation':
-        word_rus = state.get('temp_rus')
-        word_eng = raw_command
-        words[word_rus] = {
-            "translation": word_eng,
-            "added_at": datetime.now().isoformat(),
-            "level": 0
+    if state.get('action') == 'wait_trans':
+        ru_key = state.get('tmp_ru')
+        words[ru_key] = {
+            "translation": raw_cmd,
+            "date": datetime.now().isoformat()
         }
         full_data['words'] = words
         entry.bank = full_data
         orm.attributes.flag_modified(entry, "bank")
         db_sess.commit()
-        res['response']['text'] = f"Записала! {word_rus} — {word_eng}."
+        res['response']['text'] = f"Записала! '{ru_key}' — это '{raw_cmd}'."
         res['session_state'] = {}
         db_sess.close()
         return jsonify(res)
 
-    if state.get('action') == 'waiting_for_word':
-        res['response']['text'] = f"Хорошо, '{raw_command}'. Какой перевод?"
-        res['session_state'] = {
-            "action": "waiting_for_translation",
-            "temp_rus": raw_command
-        }
+    if state.get('action') == 'wait_ru':
+        if not raw_cmd:
+            res['response']['text'] = "Я не расслышала. Какое слово добавить?"
+            return jsonify(res)
+        res['response']['text'] = f"Слово '{raw_cmd}'. Назовите его перевод."
+        res['session_state'] = {"action": "wait_trans", "tmp_ru": raw_cmd}
         db_sess.close()
         return jsonify(res)
 
-    if state.get('mode') == 'training':
-        target_word = state.get('current_q')
-        correct_answer = words[target_word]['translation']
-        if clean_user_text(raw_command) == clean_user_text(correct_answer):
+    if state.get('mode') == 'quiz':
+        target = state.get('current_q')
+        # Обработка разных структур хранения
+        if isinstance(words[target], dict):
+            correct = words[target]['translation']
+        else:
+            correct = words[target]
+            
+        if clean_text_input(raw_cmd) == clean_text_input(correct):
             stats['score'] += 10
             stats['correct'] += 1
             stats['streak'] += 1
             if stats['streak'] > stats['max_streak']:
                 stats['max_streak'] = stats['streak']
+                
             if stats['score'] >= stats['level'] * 100:
                 stats['level'] += 1
-                msg = f"Верно! Новый уровень: {stats['level']}! "
+                m = f"Верно! Новый уровень: {stats['level']}! "
             else:
-                msg = "Правильно! "
-            all_keys = list(words.keys())
-            next_q = random.choice(all_keys)
+                m = "Правильно! "
+                
             full_data['stats'] = stats
             entry.bank = full_data
             orm.attributes.flag_modified(entry, "bank")
             db_sess.commit()
-            res['response']['text'] = msg + f"Как переводится '{next_q}'?"
-            res['session_state'] = {"mode": "training", "current_q": next_q}
+            
+            keys = list(words.keys())
+            nxt = random.choice(keys)
+            res['response']['text'] = m + f"Как переводится '{nxt}'?"
+            res['session_state'] = {"mode": "quiz", "current_q": nxt}
             db_sess.close()
             return jsonify(res)
-        elif command in ["сдаюсь", "пропустить", "не знаю"]:
+            
+        elif cmd in ["сдаюсь", "пропустить", "не знаю"]:
             stats['wrong'] += 1
             stats['streak'] = 0
-            all_keys = list(words.keys())
-            next_q = random.choice(all_keys)
             full_data['stats'] = stats
             entry.bank = full_data
             orm.attributes.flag_modified(entry, "bank")
             db_sess.commit()
+            
+            keys = list(words.keys())
+            nxt = random.choice(keys)
             res['response']['text'] = (
-                f"Это было '{correct_answer}'. "
-                f"Попробуем другое: '{next_q}'?"
+                f"Правильный ответ: {correct}. "
+                f"Давайте другое: '{nxt}'?"
             )
-            res['session_state'] = {"mode": "training", "current_q": next_q}
+            res['session_state'] = {"mode": "quiz", "current_q": nxt}
             db_sess.close()
             return jsonify(res)
         else:
-            res['response']['text'] = (
-                f"Нет, это не '{raw_command}'. "
-                f"Попробуй еще раз или скажи 'сдаюсь'."
-            )
+            res['response']['text'] = f"Нет, это не '{raw_cmd}'. Попробуйте еще раз!"
             db_sess.close()
             return jsonify(res)
 
-    if command in ["добавить", "добавить слово"]:
-        res['response']['text'] = "Какое слово на русском добавим?"
-        res['session_state'] = {"action": "waiting_for_word"}
+    if cmd in ["добавить", "добавить слово"]:
+        res['response']['text'] = "Какое слово на русском языке добавим в словарь?"
+        res['session_state'] = {"action": "wait_ru"}
         db_sess.close()
         return jsonify(res)
 
-    if command in ["учить", "тренировка"]:
-        all_keys = list(words.keys())
-        if len(all_keys) < 1:
-            res['response']['text'] = "В словаре пусто. Добавьте слова."
+    if cmd in ["учить", "тренировка"]:
+        w_keys = list(words.keys())
+        if len(w_keys) < 1:
+            res['response']['text'] = "В вашем словаре пока нет слов. Добавьте их."
         else:
-            q = random.choice(all_keys)
-            res['response']['text'] = f"Начнем. Как переводится '{q}'?"
-            res['session_state'] = {"mode": "training", "current_q": q}
+            q_word = random.choice(w_keys)
+            res['response']['text'] = f"Начнем. Как переводится слово '{q_word}'?"
+            res['session_state'] = {"mode": "quiz", "current_q": q_word}
         db_sess.close()
         return jsonify(res)
 
-    if command in ["статистика", "прогресс"]:
-        txt = (
-            f"Уровень: {stats['level']}. "
-            f"Очки: {stats['score']}. "
-            f"Верно: {stats['correct']}. "
-            f"Серия: {stats['max_streak']}."
+    if cmd in ["статистика", "прогресс", "рекорды"]:
+        msg = (
+            f"Ваша статистика: \n"
+            f"Уровень: {stats.get('level', 1)}. \n"
+            f"Очков: {stats.get('score', 0)}. \n"
+            f"Верных ответов: {stats.get('correct', 0)}. \n"
+            f"Рекордная серия: {stats.get('max_streak', 0)}."
         )
-        res['response']['text'] = txt
+        res['response']['text'] = msg
         db_sess.close()
         return jsonify(res)
 
-    if command in ["помощь", "что ты умеешь"]:
-        h = (
-            "Я помогаю учить слова. \n"
-            "Скажите 'Добавить' - для нового слова. \n"
-            "Скажите 'Учить' - для проверки. \n"
-            "Скажите 'Статистика' - для прогресса."
+    if cmd in ["помощь", "что ты умеешь", "справка"]:
+        help_msg = (
+            "Я помогаю запоминать иностранные слова. \n"
+            "Вы можете сказать 'Добавить слово', 'Тренировка' или 'Статистика'. \n"
+            "Для выхода просто скажите 'Хватит'."
         )
-        res['response']['text'] = h
+        res['response']['text'] = help_msg
         db_sess.close()
         return jsonify(res)
 
     if req['session']['new']:
+        count_text = format_word_count(len(words))
         res['response']['text'] = (
-            f"Привет! В вашем словаре {len(words)} слов. "
-            f"Что будем делать сегодня?"
+            f"Рада видеть! В вашем словаре {count_text}. "
+            f"Что выберете: тренировку или новое слово?"
         )
     else:
-        res['response']['text'] = "Я вас не поняла. Скажите 'Помощь'."
+        res['response']['text'] = "Я не совсем поняла. Попробуйте сказать 'Помощь'."
 
     db_sess.close()
     return jsonify(res)
 
 
 if __name__ == '__main__':
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host='0.0.0.0', port=port)
+    srv_port = int(os.environ.get("PORT", 8080))
+    app.run(host='0.0.0.0', port=srv_port)
