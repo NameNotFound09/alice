@@ -1,4 +1,4 @@
-from flask import Flask, render_template, request, redirect, flash, url_for
+from flask import Flask, render_template, request, redirect, flash, url_for, jsonify
 from data.db_session import global_init, create_session
 from data.Banks import Bank
 from data.Users import User
@@ -8,6 +8,8 @@ from forms import LoginForm, RegisterForm
 import os
 from werkzeug.utils import secure_filename
 import random
+import json
+
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = '1234567890'
@@ -163,316 +165,96 @@ def update_avatar():
     return redirect(url_for('main'))
 
 
-@app.route('/alice', methods=['POST'])
-def alice_skill():
-    req = request.json
-    session = create_session()
-    alice_user_id = req['session']['user']['user_id']
-    bank_record = session.query(Bank).filter(Bank.alice_id == alice_user_id).first()
-
-    if not bank_record:
-        bank_record = Bank(alice_id=alice_user_id, bank={})
-        session.add(bank_record)
-        session.commit()
-
-    user_data = bank_record.bank or {}
-    command = req['request']['command'].lower().strip()
-    state = user_data.get('state', 'main')
-    response_text = ""
-    suggested_actions = []
-
-    # Приветствие и главное меню
-    if command in ['привет', 'здравствуй', 'start', 'начало', 'запусти', 'приветик']:
-        user_data['state'] = 'main'
-        session.commit()
-        response_text = (
-            "Привет! Я — помощник для изучения английских слов! 🌟\n\n"
-            "Доступные команды:\n"
-            "• 'новое слово' — добавить слово с переводом\n"
-            "• 'мои слова' — посмотреть все слова\n"
-            "• 'тест' — начать тренировку\n"
-            "• 'режим теста' — выбрать тип тренировки\n"
-            "• 'удалить слово' — удалить конкретное слово\n"
-            "• 'очистить все' — удалить все слова\n"
-            "• 'статистика' — посмотреть прогресс\n"
-            "• 'помощь' — показать подсказки\n\n"
-            "Что будем делать?"
-        )
-        suggested_actions = [
-            {"title": "Новое слово", "hide": True},
-            {"title": "Мои слова", "hide": True},
-            {"title": "Тест", "hide": True}
-        ]
-
-    # Помощь с подробными подсказками
-    elif command == 'помощь':
-        response_text = (
-            "📚 Команды помощника:\n\n"
-            "1. 'новое слово' → добавь слово:перевод (например, hello:привет)\n"
-            "2. 'мои слова' → показать все сохранённые слова\n"
-            "3. 'тест' → начать тренировку перевода\n"
-            "4. 'режим теста' → выбрать тип тренировки:\n"
-            "   - 'английский → русский'\n"
-            "   - 'русский → английский'\n"
-            "5. 'удалить слово hello' → удалить конкретное слово\n"
-            "6. 'очистить все' → удалить все слова\n"
-            "7. 'статистика' → посмотреть прогресс изучения\n"
-            "8. 'совет' → получить рекомендацию по учёбе\n"
-            "9. 'привет' → вернуться в главное меню\n\n"
-            "Чем могу помочь?"
-        )
-
-    # Выбор режима теста
-    elif command == 'режим теста':
-        user_data['state'] = 'choosing_test_mode'
-        session.commit()
-        response_text = (
-            "🎯 Выбери режим тренировки:\n"
-            "1. 'английский → русский' — перевод с английского\n"
-            "2. 'русский → английский' — перевод на английский\n"
-            "Напиши номер или название режима."
-        )
-
-    elif user_data.get('state') == 'choosing_test_mode':
-        if '1' in command or 'английский' in command:
-            user_data['test_mode'] = 'en_ru'
-            response_text = "Режим: английский → русский. Начни тренировку командой 'тест'."
-        elif '2' in command or 'русский' in command:
-            user_data['test_mode'] = 'ru_en'
-            response_text = "Режим: русский → английский. Начни тренировку командой 'тест'."
-        else:
-            response_text = "Не понял режим. Выбери 1 или 2."
-        user_data['state'] = 'main'
-        session.commit()
-
-    # Добавление нового слова с улучшенной валидацией
-    elif 'новое слово' in command:
-        user_data['state'] = 'waiting_word'
-        session.commit()
-        response_text = "📝 Напиши слово и его перевод через двоеточие. Например: hello:привет"
-
-    elif user_data.get('state') == 'waiting_word':
-        if ':' in command:
-            try:
-                word, translation = command.split(':', 1)
-                word, translation = word.strip().lower(), translation.strip()
-                if not word or not translation:
-                    response_text = "❌ Пустое слово или перевод. Попробуй ещё раз."
-                elif len(word) > 50 or len(translation) > 50:
-                    response_text = "❌ Слишком длинное слово или перевод (максимум 50 символов)."
-                else:
-                    words_dict = user_data.get('words', {})
-                    if word in words_dict:
-                        response_text = f"⚠️ Слово '{word}' уже есть в словаре. Его перевод: {words_dict[word]['translation']}"
-                    else:
-                        words_dict[word] = {
-                            'translation': translation,
-                            'correct': 0,
-                            'attempts': 0,
-                            'last_attempt': None,
-                            'streak': 0
-                }
-                user_data['words'] = words_dict
-                user_data['state'] = 'main'
-                session.commit()
-                response_text = f"✅ Слово '{word}' с переводом '{translation}' добавлено!"
-            except Exception:
-                response_text = "❌ Ошибка при добавлении слова. Используй формат: слово:перевод"
-        else:
-            response_text = "❌ Неверный формат. Напиши: слово:перевод"
-        user_data['state'] = 'main'
-        session.commit()
-
-    # Показать все слова с фильтрацией
-    elif command == 'мои слова':
-        words_dict = user_data.get('words', {})
-        if words_dict:
-            sort_by = user_data.get('sort_words', 'alphabetical')
-            if sort_by == 'alphabetical':
-                sorted_words = sorted(words_dict.items())
-            elif sort_by == 'difficulty':
-                sorted_words = sorted(words_dict.items(), key=lambda x: x[1]['correct'] / max(x[1]['attempts'], 1) if x[1]['attempts'] > 0 else 0)
-            else:
-                sorted_words = list(words_dict.items())
-
-            words_list = [f"{w} — {d['translation']}" for w, d in sorted_words]
-            response_text = f"📋 Твои слова ({len(words_list)}):\n" + "\n".join(words_list[:20])
-            if len(words_list) > 20:
-                response_text += f"\n... и ещё {len(words_list) - 20} слов. Покажи все командой 'все слова'."
-        else:
-            response_text = "📝 У тебя пока нет сохранённых слов. Добавь их командой 'новое слово'."
-
-    # Статистика с детализацией
-    elif command == 'статистика':
-        words_dict = user_data.get('words', {})
-        total = len(words_dict)
-        attempts = sum(d['attempts'] for d in words_dict.values())
-        correct = sum(d['correct'] for d in words_dict.values())
-        accuracy = (correct / attempts * 100) if attempts > 0 else 0
-        streak = max((d['streak'] for d in words_dict.values()), default=0)
-
-        response_text = (
-            f"📊 Статистика изучения:\n"
-            f"Всего слов: {total}\n"
-            f"Правильных ответов: {correct}\n"
-            f"Всего попыток: {attempts}\n"
-            f"Точность: {accuracy:.1f}%\n"
-            f"Лучшая серия правильных ответов: {streak}\n\n"
-            "Совет: старайся учить по 5–10 слов в день!"
-        )
-
-    # Совет по учёбе
-    elif command == 'совет':
-        words_dict = user_data.get('words', {})
-        total = len(words_dict)
-        if total == 0:
-            response_text = "📚 Совет: начни с добавления первых 5–10 слов — это отличная отправная точка!"
-        elif total < 10:
-            response_text = "📚 Совет: добавь ещё несколько слов, чтобы тренировка была интереснее. Цель — 20–30 слов!"
-        elif accuracy < 70:
-            response_text = "📚 Совет: сосредоточься на словах с низкой точностью. Повторяй их чаще — и точность вырастет!"
-        else:
-            response_text = "📚 Отличный прогресс! Продолжай в том же духе — повторяй слова регулярно для лучшего запоминания."
-
-
-    # Начало тренировки
-    elif command == 'тест':
-        words_dict = user_data.get('words', {})
-        if not words_dict:
-            response_text = "Сначала добавь слова командой 'новое слово'."
-        else:
-            test_mode = user_data.get('test_mode', 'en_ru')
-            test_words = list(words_dict.keys())
-
-            if test_mode == 'en_ru':
-                current_word = random.choice(test_words)
-                user_data['current_test_word'] = current_word
-                user_data['state'] = 'answering_test'
-                session.commit()
-                response_text = f"❓ Как переводится слово '{current_word}'?"
-            else:  # ru_en
-                # Ищем слово с переводом, который выглядит как русское слово
-                ru_words = [w for w, d in words_dict.items() if any(c in 'абвгдеёжзийклмнопрстуфхцчшщъыьэюя' for c in d['translation'])]
-                if ru_words:
-                    current_word_ru = random.choice(ru_words)
-                    translation_en = words_dict[current_word_ru]['translation']
-                    user_data['current_test_word'] = translation_en
-                    user_data['expected_translation'] = current_word_ru
-                    user_data['state'] = 'answering_test_ru_en'
-                    session.commit()
-            response_text = f"❓ Переведи на английский: '{current_word_ru}'?"
-        else:
-            response_text = "Недостаточно русских переводов для тренировки. Добавь слова с русскими переводами."
-
-    # Ответ в режиме английский → русский
-    elif user_data.get('state') == 'answering_test':
-        current_word = user_data.get('current_test_word')
-        words_dict = user_data.get('words', {})
-        correct_translation = words_dict[current_word]['translation']
-        user_answer = command.lower()
-
-        words_dict[current_word]['attempts'] += 1
-        if user_answer == correct_translation.lower():
-            words_dict[current_word]['correct'] += 1
-            words_dict[current_word]['streak'] += 1
-            response_text = "✅ Правильно! Молодец!"
-        else:
-            words_dict[current_word]['streak'] = 0
-            response_text = f"❌ Неверно. Правильный перевод: '{correct_translation}'"
-
-        user_data['words'] = words_dict
-        user_data['state'] = 'main'
-        session.commit()
-
-    # Ответ в режиме русский → английский
-    elif user_data.get('state') == 'answering_test_ru_en':
-        expected_translation = user_data.get('expected_translation')
-        user_answer = command.lower().strip()
-        words_dict = user_data.get('words', {})
-
-        # Находим слово по ожидаемому переводу
-        target_word = None
-        for w, d in words_dict.items():
-            if d['translation'].lower() == expected_translation.lower():
-                target_word = w
-                break
-
-        if target_word:
-            words_dict[target_word]['attempts'] += 1
-            if user_answer == target_word.lower():
-                words_dict[target_word]['correct'] += 1
-                words_dict[target_word]['streak'] += 1
-                response_text = "✅ Верно! Отлично!"
-            else:
-                words_dict[target_word]['streak'] = 0
-                response_text = f"❌ Неправильно. Правильный ответ: '{target_word}'"
-
-            user_data['words'] = words_dict
-            user_data['state'] = 'main'
-            session.commit()
-        else:
-            response_text = "❌ Ошибка системы. Попробуй начать тест заново."
-            user_data['state'] = 'main'
-            session.commit()
-
-    # Удаление конкретного слова
-    elif command.startswith('удалить слово '):
-        word_to_delete = command.replace('удалить слово ', '').strip().lower()
-        words_dict = user_data.get('words', {})
-        if word_to_delete in words_dict:
-            del words_dict[word_to_delete]
-            user_data['words'] = words_dict
-            session.commit()
-            response_text = f"🗑️ Слово '{word_to_delete}' удалено."
-        else:
-            response_text = f"Слово '{word_to_delete}' не найдено."
-
-    # Очистка всех слов
-    elif command == 'очистить все':
-        confirm = user_data.get('confirm_clear', False)
-        if not confirm and command != 'да, точно очистить':
-            user_data['confirm_clear'] = True
-            session.commit()
-            response_text = "⚠️ Ты уверен, что хочешь удалить ВСЕ слова? Скажи 'да, точно очистить' для подтверждения."
-        else:
-            user_data['words'] = {}
-            user_data['confirm_clear'] = False
-            user_data['state'] = 'main'
-            session.commit()
-            response_text = "🗑️ Все слова успешно удалены."
-
-    # Неизвестная команда
-    else:
-        response_text = (
-            "❌ Не поняла команду.\n"
-            "Попробуй:\n"
-            "- 'привет' — главное меню\n"
-            "- 'новое слово' — добавить слово\n"
-            "- 'мои слова' — посмотреть слова\n"
-            "- 'тест' — тренировка\n"
-            "- 'режим теста' — выбрать тип тренировки\n"
-            "- 'статистика' — прогресс\n"
-            "- 'совет' — рекомендация\n"
-            "- 'помощь' — все команды"
-        )
-
-    bank_record.bank = user_data
-    session.commit()
-
+def alice_response(text, buttons=None, end_session=False):
+    """Формирует стандартный ответ в формате Алисы."""
     response = {
-        'response': {
-            'text': response_text,
-            'end_session': False
+        "response": {
+            "text": text,
+            "buttons": buttons or [],
+            "end_session": end_session
         },
-        'version': req['version']
+        "version": "1.0"
     }
-
-    if suggested_actions:
-        response['response']['buttons'] = suggested_actions
-
-
     return jsonify(response)
 
+@app.route('/alice', methods=['POST'])
+def alice_webhook():
+    req = request.json
+    user_id = req['session']['user_id']
+    command = req['request'].get('command', '').lower()
+    session_state = req.get('state', {}).get('session', {})
+    
+    # Инициализация сессии или получение из состояния
+    db_sess = create_session()
+    # Предполагаем, что у Алисы свой "пользователь" в БД. 
+    # Если его нет, создаем или привязываем к гостевому ID.
+    bank_entry = db_sess.query(Bank).filter(Bank.id == user_id).first()
+    if not bank_entry:
+        # Для простоты создаем запись, если ее нет (или используйте заглушку)
+        bank_entry = Bank(id=user_id, bank={})
+        db_sess.add(bank_entry)
+        db_sess.commit()
+
+    user_bank = bank_entry.bank
+
+    # --- ЛОГИКА ДИАЛОГА ---
+    
+    # 1. Помощь
+    if 'помощь' in command or 'что ты умеешь' in command:
+        return alice_response(
+            "Я помогу учить слова! Вы можете сказать: "
+            "'Добавь слово: перевод', 'Удали слово', 'Очисти банк' или 'Список слов'.",
+            buttons=[{"title": "Список слов", "hide": True}, {"title": "Очистить банк", "hide": True}]
+        )
+
+    # 2. Очистка банка
+    if 'очисти' in command or 'очистить' in command:
+        bank_entry.bank = {}
+        db_sess.commit()
+        return alice_response("Банк слов успешно очищен.")
+
+    # 3. Просмотр слов
+    if 'список' in command or 'покажи' in command:
+        if not user_bank:
+            return alice_response("Ваш банк слов пуст.")
+        words_str = ", ".join([f"{k} - {v}" for k, v in user_bank.items()])
+        return alice_response(f"Ваши слова: {words_str}")
+
+    # 4. Удаление слова (режим или команда)
+    if 'удали' in command or 'удалить' in command:
+        # Пытаемся вытащить слово из команды (например, "удали собака")
+        parts = command.split()
+        if len(parts) > 1:
+            word_to_del = parts[1]
+            if word_to_del in user_bank:
+                del user_bank[word_to_del]
+                db_sess.commit()
+                return alice_response(f"Слово {word_to_del} удалено.")
+            return alice_response("Такого слова нет в банке.")
+        return alice_response("Какое слово удалить?")
+
+    # 5. Добавление слова - Способ 1: Прямая команда (формат: слово перевод)
+    # Пример: "Добавь кошка cat"
+    if 'добавь' in command:
+        parts = command.split()
+        if len(parts) >= 3:
+            word = parts[1]
+            translation = " ".join(parts[2:])
+            user_bank[word] = translation
+            db_sess.commit()
+            return alice_response(f"Добавлено: {word} - {translation}", 
+                                  buttons=[{"title": "Еще добавить", "hide": True}])
+        
+        # Если формат неверный, переходим в диалоговый режим (способ 2)
+        return alice_response("Какое слово и перевод добавить? Скажите, например: 'Кошка, Кэт'.",
+                              buttons=[{"title": "Помощь", "hide": True}])
+
+    # 6. Режим ожидания (если пользователь ранее что-то начал)
+    # Здесь можно добавить логику проверки сессии, если нужно хранить контекст
+    
+    return alice_response("Я вас не совсем поняла. Скажите 'помощь', чтобы узнать, что я умею.")
+
+#
 
 
 if __name__ == '__main__':
